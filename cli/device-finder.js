@@ -13,17 +13,7 @@ function asFilter(filter) {
 
 	if(typeof filter === 'string') {
 		return reg => {
-			// Assign management if this filter is filtering a device
-			const mgmt = reg.management ? reg.management : reg;
-
-			// Make sure to remove `miio:` prefix from ids when matching
-			let id = String(reg.id);
-			if(id.indexOf('miio:') === 0) {
-				id = id.substring(5);
-			}
-
-			// Match id, address or model
-			return id === filter || mgmt.address === filter || mgmt.model === filter;
+			return String(reg.id) === filter || reg.address === filter || reg.model === filter;
 		};
 	} else if(typeof filter === 'function') {
 		return filter;
@@ -55,12 +45,12 @@ module.exports = function(options={}) {
 			filter: options.filter ? asToplevelFilter(filter) : null,
 		});
 
-		browser.on('available', device => {
-			if(filter(device)) {
-				result.emit('available', device);
+		browser.on('available', reg => {
+			if(filter(reg)) {
+				result.emit('available', reg.device);
 			}
 		});
-		browser.on('unavailable', device => result.emit('unavailable', device));
+		browser.on('unavailable', reg => result.emit('unavailable', reg.device));
 	}
 	return result;
 };
