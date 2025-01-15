@@ -10,14 +10,12 @@ exports.description = 'Control a device by invoking the given method';
 exports.builder = {
 	ssid: {
 		required: true,
-		description: 'SSID of the WiFi network',
-		type: 'string'
+		description: 'SSID of the WiFi network'
 	},
 
 	passwd: {
 		required: true,
-		description: 'Password of WiFi-network',
-		type: 'string'
+		description: 'Password of WiFi-network'
 	}
 };
 
