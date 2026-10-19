@@ -261,3 +261,81 @@ test('concurrent handshakes share work and a failure is cleared for retry', asyn
 	assert.strictEqual(device.handshakeState, null);
 	assert.strictEqual(deadlines[1].cleared, true);
 });
+
+test('accepts a valid handshake reply without waiting for the UDP send callback', async () => {
+	const device = new DeviceInfo({ socket: {} }, 1, '192.0.2.1', 54321);
+	device.packet.token = TOKEN;
+	const deadlines = installManualDeadlines(device);
+	const pendingSend = deferred();
+	device._sendPacket = function() {
+		const packet = Buffer.from(this.packet.raw);
+		packet.writeUInt32BE(0, 4);
+		packet.writeUInt32BE(1, 8);
+		packet.writeUInt32BE(123456, 12);
+		setImmediate(() => this.onMessage(packet));
+		return pendingSend.promise;
+	};
+
+	const outcome = device.handshake().then(
+		value => ({ value }),
+		error => ({ error })
+	);
+	await new Promise(resolve => setImmediate(resolve));
+	if(!deadlines[0].cleared) deadlines[0].expire();
+	const result = await outcome;
+	assert.strictEqual(result.error, undefined);
+	assert.deepStrictEqual(result.value, TOKEN);
+	assert.strictEqual(deadlines[0].cleared, true);
+	assert.strictEqual(device.handshakePromise, null);
+	assert.strictEqual(device.handshakeState, null);
+	assert.strictEqual(device.handshakeResolve, null);
+	pendingSend.resolve();
+});
+
+test('accepts a valid command reply without waiting for the UDP send callback', async () => {
+	const device = createDevice();
+	const deadlines = installManualDeadlines(device);
+	const pendingSend = deferred();
+	device._sendPacket = function() {
+		const id = requestId(device);
+		setImmediate(() => reply(device, id, [ { did: 'power', code: 0, value: false } ]));
+		return pendingSend.promise;
+	};
+
+	const outcome = device.call('get_properties', [ { did: 'power', siid: 2, piid: 2 } ], { retries: 1 }).then(
+		value => ({ value }),
+		error => ({ error })
+	);
+	await waitFor(() => device.promises.size === 1, 'request did not start');
+	await new Promise(resolve => setImmediate(resolve));
+	if(!deadlines[0].cleared) deadlines[0].expire();
+	const result = await outcome;
+	assert.strictEqual(result.error, undefined);
+	assert.deepStrictEqual(result.value, [ { did: 'power', code: 0, value: false } ]);
+	assert.strictEqual(deadlines[0].cleared, true);
+	assert.strictEqual(device.promises.size, 0);
+	// A delayed send error must be handled even after the response completed the call.
+	pendingSend.reject(new Error('late send callback error'));
+	await new Promise(resolve => setImmediate(resolve));
+});
+
+test('preserves legacy property, vacuum status and write acknowledgements', async () => {
+	for(const scenario of [
+		{ method: 'get_prop', params: [ 'power', 'speed' ], result: [ 'off', 0 ] },
+		{ method: 'get_status', params: [], result: [ { state: 8, battery: 63 } ] },
+		{ method: 'set_power', params: [ 'on' ], result: [ 'ok' ] }
+	]) {
+		const device = createDevice();
+		const deadlines = installManualDeadlines(device);
+		device._sendPacket = async function() {
+			const request = JSON.parse(this.packet.data.toString('utf8'));
+			assert.strictEqual(request.method, scenario.method);
+			assert.deepStrictEqual(request.params, scenario.params);
+			reply(this, request.id, scenario.result);
+		};
+
+		assert.deepStrictEqual(await device.call(scenario.method, scenario.params, { retries: 1 }), scenario.result);
+		assert.strictEqual(device.promises.size, 0);
+		assert.ok(deadlines.every(deadline => deadline.cleared));
+	}
+});
