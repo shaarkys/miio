@@ -339,3 +339,77 @@ test('preserves legacy property, vacuum status and write acknowledgements', asyn
 		assert.ok(deadlines.every(deadline => deadline.cleared));
 	}
 });
+
+function handshakeReply(id = 123456789) {
+	const packet = Buffer.alloc(32, 255);
+	packet.writeUInt16BE(0x2131, 0);
+	packet.writeUInt16BE(32, 2);
+	packet.writeUInt32BE(0, 4);
+	packet.writeUInt32BE(id, 8);
+	packet.writeUInt32BE(123456, 12);
+	return packet;
+}
+
+test('a late handshake restores the public DID and model after the initial connection times out', async () => {
+	const device = new DeviceInfo({ socket: {} }, null, '192.0.2.1', 54321);
+	device.packet.token = TOKEN;
+	const deadlines = installManualDeadlines(device);
+	device._sendPacket = async function() {};
+
+	const failedConnection = device.handshake();
+	deadlines[0].expire();
+	await assert.rejects(failedConnection, error => error.code === 'timeout');
+	assert.strictEqual(device.handshakeResolve, null);
+	device.onMessage(handshakeReply());
+
+	assert.strictEqual(device.packet.deviceId, 123456789);
+	assert.strictEqual(device.packet.needsHandshake, false);
+	assert.strictEqual(device.id, 123456789);
+	assert.deepStrictEqual(await device.handshake(), TOKEN);
+	assert.strictEqual(deadlines.length, 1, 'a fresh received handshake should be reusable');
+
+	device._sendPacket = async function() {
+		const request = JSON.parse(this.packet.data.toString('utf8'));
+		assert.strictEqual(request.method, 'miIO.info');
+		reply(this, request.id, { model: 'xiaomi.vacuum.d109gl' });
+	};
+	await device.enrich();
+	assert.strictEqual(device.model, 'xiaomi.vacuum.d109gl');
+	assert.strictEqual(device.id, 123456789);
+});
+
+test('a valid encrypted response also repairs missing public connection identity', () => {
+	const Packet = require('../lib/packet');
+	const device = new DeviceInfo({ socket: {} }, null, '192.0.2.1', 54321);
+	device.packet.token = TOKEN;
+	const response = new Packet();
+	response.token = TOKEN;
+	response.header.writeUInt32BE(123456789, 8);
+	response.header.writeUInt32BE(123456, 12);
+	response.data = Buffer.from(JSON.stringify({ id: 1, result: [ { did: 'power', code: 0, value: false } ] }));
+
+	device.onMessage(response.raw);
+	assert.strictEqual(device.id, 123456789);
+});
+
+test('recovery ignores malformed handshakes and packets with an invalid encrypted checksum', () => {
+	const Packet = require('../lib/packet');
+	for(const corruption of [ 'header', 'checksum', 'zero-id', 'broadcast-id' ]) {
+		const device = new DeviceInfo({ socket: {} }, null, '192.0.2.1', 54321);
+		device.packet.token = TOKEN;
+		let packet = handshakeReply();
+		if(corruption === 'header') packet[0] = 0;
+		if(corruption === 'zero-id') packet.writeUInt32BE(0, 8);
+		if(corruption === 'broadcast-id') packet.writeUInt32BE(0xffffffff, 8);
+		if(corruption === 'checksum') {
+			const response = new Packet();
+			response.token = TOKEN;
+			response.header.writeUInt32BE(123456789, 8);
+			response.data = Buffer.from(JSON.stringify({ id: 1, result: [ 'ok' ] }));
+			packet = response.raw;
+			packet[16] ^= 1;
+		}
+		device.onMessage(packet);
+		assert.strictEqual(device.id, null, corruption);
+	}
+});
